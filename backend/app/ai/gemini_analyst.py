@@ -125,16 +125,52 @@ class GeminiAnalyst:
                 prompt,
                 generation_config={
                     "temperature": 0.2,
-                    "max_output_tokens": 2048,
+                    # Amplio: los modelos "pensantes" (Gemini 2.5) gastan tokens
+                    # razonando; con un límite bajo la respuesta llegaría vacía/cortada.
+                    "max_output_tokens": 8192,
                     "response_mime_type": "application/json",
                 },
             )
-            data = self._extract_json(resp.text)
+            text, reason = self._response_text(resp)
+            data = self._extract_json(text)
             if data is None:
-                return {"ok": False, "error": "La IA no devolvió un JSON válido."}
+                detail = "respuesta vacía o incompleta"
+                if reason:
+                    detail += f" (motivo: {reason})"
+                return {"ok": False, "error": f"La IA no devolvió un JSON válido ({detail})."}
             return {"ok": True, "data": data}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _response_text(resp) -> "tuple[str, Optional[str]]":
+        """Extrae el texto de la respuesta de forma robusta y el finish_reason.
+
+        Evita que resp.text lance si la respuesta viene sin partes claras.
+        """
+        reason = None
+        # Intento directo
+        try:
+            if getattr(resp, "text", None):
+                return resp.text, reason
+        except Exception:  # noqa: BLE001
+            pass
+        # Recorre los candidatos manualmente
+        try:
+            for cand in getattr(resp, "candidates", []) or []:
+                reason = str(getattr(cand, "finish_reason", "")) or reason
+                content = getattr(cand, "content", None)
+                parts = getattr(content, "parts", []) if content else []
+                buf = []
+                for p in parts:
+                    t = getattr(p, "text", None)
+                    if t:
+                        buf.append(t)
+                if buf:
+                    return "".join(buf), reason
+        except Exception:  # noqa: BLE001
+            pass
+        return "", reason
 
     @staticmethod
     def _extract_json(text: str) -> Optional[Dict]:
