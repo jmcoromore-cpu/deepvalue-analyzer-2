@@ -1,120 +1,80 @@
-"""Parser del informe Markdown de Gemini a estructura tipada.
+"""Convierte el JSON estructurado de la IA en los modelos de la aplicación.
 
-Extrae secciones (MOAT, PORTER, EQUIPO_GESTOR, etc.) y las mapea a los modelos
-Pydantic. Es tolerante: si el modelo no sigue el formato, conserva el texto crudo.
+Al recibir el análisis ya estructurado (no texto libre), el mapeo es directo y
+fiable: cada campo del JSON va a su lugar, sin adivinanzas ni troceo de texto.
 """
 from __future__ import annotations
 
-import re
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from ..models.schemas import (ManagementAnalysis, MoatAnalysis, MoatType,
                               PorterAnalysis, PorterForce, QualitativeAnalysis)
 
 
-def _split_sections(md: str) -> Dict[str, str]:
-    sections: Dict[str, str] = {}
-    current = None
-    buf: List[str] = []
-    for line in md.splitlines():
-        m = re.match(r"^#+\s*([A-ZÁÉÍÓÚÑ_]+)", line.strip())
-        if m:
-            if current:
-                sections[current] = "\n".join(buf).strip()
-            current = m.group(1).upper()
-            buf = []
-        elif current:
-            buf.append(line)
-    if current:
-        sections[current] = "\n".join(buf).strip()
-    return sections
+def _present_to_bool(value) -> Optional[bool]:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in ("sí", "si", "true", "yes"):
+        return True
+    if s in ("no", "false"):
+        return False
+    return None  # "Parcial" u otros -> indeterminado
 
 
-def parse_ai_markdown(md: str) -> QualitativeAnalysis:
-    qa = QualitativeAnalysis(ai_generated=True, raw_ai_markdown=md)
-    sections = _split_sections(md)
-
-    # MOAT
-    moat_txt = sections.get("MOAT", "")
-    rating = "Narrow"
-    rm = re.search(r"MOAT_GLOBAL:\s*(Wide|Narrow|None)", moat_txt, re.IGNORECASE)
-    if rm:
-        rating = rm.group(1).capitalize()
-    qa.moat = MoatAnalysis(overall_rating=rating, summary=moat_txt[:900],
-                           types=_parse_moat_types(moat_txt))
-
-    # PORTER
-    porter_txt = sections.get("PORTER", "")
-    qa.porter = PorterAnalysis(summary=porter_txt[:900], forces=_parse_porter(porter_txt))
-
-    # MANAGEMENT
-    mgmt_txt = sections.get("EQUIPO_GESTOR", "") or sections.get("EQUIPO", "")
-    qa.management = ManagementAnalysis(summary=mgmt_txt[:900])
-
-    # CALIDAD
-    qa.business_quality = sections.get("CALIDAD_NEGOCIO", "").split("\n")[0][:200] \
-        if sections.get("CALIDAD_NEGOCIO") else ""
-
-    # CONFIANZA
-    conf_txt = sections.get("CONFIANZA", "")
-    cm = re.search(r"CONFIANZA:\s*(Alta|Media|Baja)", conf_txt, re.IGNORECASE)
-    qa.confidence = cm.group(1).capitalize() if cm else "Media"
-
-    return qa, sections
+def _clean(value) -> str:
+    return str(value).strip() if value is not None else ""
 
 
-def _parse_moat_types(txt: str) -> List[MoatType]:
-    known = [
-        ("Activos intangibles", ["intangible", "marca", "patente", "licencia"]),
-        ("Costes de reemplazo", ["reemplazo", "switching", "cautiv"]),
-        ("Efecto red", ["efecto red", "network"]),
-        ("Ventajas en costes", ["coste", "escala"]),
-    ]
-    out = []
-    low = txt.lower()
-    for name, kws in known:
-        idx = min([low.find(k) for k in kws if low.find(k) >= 0] or [-1])
-        rationale = ""
-        strength = ""
-        if idx >= 0:
-            snippet = txt[idx:idx + 240]
-            rationale = snippet.replace("\n", " ").strip()
-            sm = re.search(r"(Fuerte|Moderada|D[ée]bil|Ninguna)", snippet, re.IGNORECASE)
-            if sm:
-                strength = sm.group(1)
-        out.append(MoatType(name=name, strength=strength or "n/d", rationale=rationale))
-    return out
+def parse_ai_json(data: Dict) -> Tuple[QualitativeAnalysis, str, Optional[List[str]]]:
+    """Devuelve (QualitativeAnalysis, tesis, riesgos)."""
+    qa = QualitativeAnalysis(ai_generated=True)
 
+    # --- MOAT ---
+    moat_data = data.get("moat", {}) or {}
+    types = []
+    for t in moat_data.get("types", []) or []:
+        types.append(MoatType(
+            name=_clean(t.get("name")) or "Tipo de foso",
+            present=_present_to_bool(t.get("present")),
+            strength=_clean(t.get("strength")) or "n/d",
+            rationale=_clean(t.get("rationale")),
+        ))
+    qa.moat = MoatAnalysis(
+        overall_rating=_clean(moat_data.get("overall_rating")) or "Narrow",
+        summary=_clean(moat_data.get("summary")),
+        types=types,
+    )
 
-def _parse_porter(txt: str) -> List[PorterForce]:
-    forces = [
-        ("Rivalidad entre competidores", ["rivalidad", "competidores"]),
-        ("Amenaza de nuevos entrantes", ["entrantes", "barreras"]),
-        ("Amenaza de sustitutivos", ["sustitut", "disrupci"]),
-        ("Poder de clientes", ["clientes"]),
-        ("Poder de proveedores", ["proveedores"]),
-    ]
-    out = []
-    low = txt.lower()
-    for name, kws in forces:
-        idx = min([low.find(k) for k in kws if low.find(k) >= 0] or [-1])
-        rationale, intensity = "", ""
-        if idx >= 0:
-            snippet = txt[idx:idx + 220]
-            rationale = snippet.replace("\n", " ").strip()
-            im = re.search(r"(Alta|Media|Baja)", snippet, re.IGNORECASE)
-            if im:
-                intensity = im.group(1).capitalize()
-        out.append(PorterForce(name=name, intensity=intensity or "n/d", rationale=rationale))
-    return out
+    # --- PORTER ---
+    porter_data = data.get("porter", {}) or {}
+    forces = []
+    for f in porter_data.get("forces", []) or []:
+        fav = f.get("favorable_for_company")
+        forces.append(PorterForce(
+            name=_clean(f.get("name")) or "Fuerza",
+            intensity=_clean(f.get("intensity")) or "n/d",
+            favorable_for_company=bool(fav) if isinstance(fav, bool) else None,
+            rationale=_clean(f.get("rationale")),
+        ))
+    qa.porter = PorterAnalysis(summary=_clean(porter_data.get("summary")), forces=forces)
 
+    # --- MANAGEMENT ---
+    mgmt = data.get("management", {}) or {}
+    qa.management = ManagementAnalysis(
+        capital_allocation=_clean(mgmt.get("capital_allocation")),
+        alignment=_clean(mgmt.get("alignment")),
+        operating_skill=_clean(mgmt.get("operating_skill")),
+        integrity=_clean(mgmt.get("integrity")),
+        summary="",  # vacío a propósito: el frontend muestra los 4 campos detallados
+    )
 
-def extract_thesis_risks(sections: Dict[str, str]):
-    thesis = sections.get("TESIS", "").strip()
-    risks_txt = sections.get("RIESGOS", "")
-    risks = []
-    for line in risks_txt.splitlines():
-        s = line.strip("-•* ").strip()
-        if s and len(s) > 3:
-            risks.append(s)
-    return thesis, risks[:8]
+    # --- Calidad, confianza ---
+    qa.business_quality = _clean(data.get("business_quality"))
+    qa.confidence = _clean(data.get("confidence")) or "Media"
+
+    # --- Tesis y riesgos ---
+    thesis = _clean(data.get("thesis"))
+    risks_raw = data.get("risks", []) or []
+    risks = [_clean(r) for r in risks_raw if _clean(r)]
+    return qa, thesis, (risks or None)

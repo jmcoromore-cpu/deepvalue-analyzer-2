@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from ..ai.gemini_analyst import GeminiAnalyst
-from ..ai.parser import extract_thesis_risks, parse_ai_markdown
+from ..ai.parser import parse_ai_json
 from ..config import get_settings
 from ..data_sources.aggregator import DataAggregator
 from ..models.schemas import (AnalysisResponse, CompanyProfile,
@@ -79,21 +79,18 @@ class Analyzer:
         signals = compute_signals(fs)
         moat_score = moat_signal_strength(signals)
 
-        # --- Cualitativo: IA o reglas ---
+        # --- Cualitativo: IA (JSON estructurado) o reglas ---
         qualitative: QualitativeAnalysis
         ai_thesis, ai_risks = "", None
-        ai_used = False
         if use_ai and self.ai.enabled:
-            md = self.ai.analyze(profile, signals, valuation)
-            if md and not md.startswith("__AI_ERROR__"):
-                qualitative, sections = parse_ai_markdown(md)
-                # completa scores cuantitativos del moat en la estructura IA
+            result = self.ai.analyze(profile, signals, valuation)
+            if result and result.get("ok"):
+                qualitative, ai_thesis, ai_risks = parse_ai_json(result["data"])
+                # completa el score cuantitativo del moat en la estructura de la IA
                 qualitative.moat.overall_score = moat_score
-                ai_thesis, ai_risks = extract_thesis_risks(sections)
-                ai_used = True
             else:
-                warnings.append("IA no disponible; se usó análisis por reglas. "
-                                + (md or "").replace("__AI_ERROR__:", "Error IA:"))
+                err = (result or {}).get("error", "desconocido")
+                warnings.append(f"IA no disponible; se usó análisis por reglas. Error IA: {err}")
                 qualitative = build_rule_based(profile, signals, moat_score)
         else:
             if use_ai and not self.ai.enabled:

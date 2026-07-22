@@ -1,9 +1,9 @@
 """Analista cualitativo con Google Gemini.
 
-Construye un prompt que incorpora el marco de análisis fundamental del curso
-(Pat Dorsey + Porter + Buffett) y alimenta al modelo con los datos financieros
-YA CALCULADOS (el modelo no inventa cifras). Devuelve el informe en Markdown y
-una versión estructurada del veredicto cualitativo.
+Pide a Gemini que devuelva el análisis YA ESTRUCTURADO en JSON (no texto libre),
+usando el marco del curso (Pat Dorsey + Porter + Buffett). Así cada campo se
+rellena de forma fiable, sin necesidad de trocear texto. El modelo no inventa
+cifras: recibe los datos financieros ya calculados y solo emite el juicio.
 """
 from __future__ import annotations
 
@@ -11,79 +11,80 @@ import json
 from typing import Dict, Optional
 
 from ..config import get_settings
-from ..models.schemas import (CompanyProfile, QualitativeAnalysis, ValuationResult)
+from ..models.schemas import CompanyProfile, ValuationResult
 
 SYSTEM_PROMPT = """
 Eres un Analista Financiero Senior especializado en Inversión en Valor (Value Investing)
-a largo plazo (5-10 años). Tu objetivo NO es hacer trading ni buscar puntos de entrada
-especulativos, sino evaluar la CALIDAD FUNDAMENTAL del negocio, la durabilidad de sus
-ventajas competitivas y su viabilidad como inversión de por vida.
+a largo plazo (5-10 años). Evalúas la CALIDAD FUNDAMENTAL del negocio y la durabilidad de
+sus ventajas competitivas, no el trading a corto plazo.
 
-Aplicas rigurosamente el siguiente marco (Pat Dorsey, Michael Porter, Warren Buffett):
-
-1. VENTAJAS COMPETITIVAS (MOAT) — los 4 fosos de Pat Dorsey:
-   - Activos intangibles: marcas que influyen en la conducta del consumidor (no solo
-     notoriedad), patentes, licencias, concesiones administrativas.
-   - Costes de reemplazo (switching costs): clientes cautivos, poder de fijación de precios.
-   - Efecto red: el valor crece con el número de usuarios (dinámicas winner-takes-all).
-   - Ventajas en costes: procesos eficientes, ubicación, activos únicos, economías de escala.
-   Considera también la cultura empresarial cuando sea un foso real.
-
-2. LAS 5 FUERZAS DE PORTER: rivalidad, nuevos entrantes (barreras de entrada),
-   sustitutivos (riesgo de disrupción), poder de clientes, poder de proveedores.
-
-3. EQUIPO GESTOR: asignación de capital (reinversión vs M&A vs dividendos vs recompras),
-   alineamiento de intereses (skin in the game, estructura accionarial, remuneración),
-   pericia operativa e integridad.
+Aplicas el marco de Pat Dorsey (4 fosos: activos intangibles, costes de reemplazo,
+efecto red, ventajas en costes), las 5 Fuerzas de Michael Porter, y los criterios de
+Warren Buffett sobre equipo gestor (asignación de capital, alineamiento de intereses /
+skin in the game, pericia operativa e integridad).
 
 REGLAS ESTRICTAS:
-- NO inventes cifras. Usa solo los datos financieros que se te proporcionan.
-- Distingue claramente lo que puedes inferir de los datos de lo que es juicio de negocio.
-- Señala tu nivel de confianza (Alta / Media / Baja) al final.
-- Sé objetivo y equilibrado: expón tanto fortalezas como riesgos estructurales.
+- NO inventes cifras financieras. Usa solo los datos que se te proporcionan.
+- Sé objetivo y equilibrado: expón fortalezas y también riesgos estructurales.
+- Responde EXCLUSIVAMENTE con un objeto JSON válido que siga el esquema pedido.
+  No añadas texto fuera del JSON ni bloques de código markdown.
+"""
+
+# Estructura JSON exacta que debe devolver el modelo.
+JSON_INSTRUCTIONS = """
+Devuelve un JSON con EXACTAMENTE esta estructura (rellena todos los campos en español):
+
+{
+  "moat": {
+    "overall_rating": "Wide | Narrow | None",
+    "summary": "2-3 frases sobre la ventaja competitiva global.",
+    "types": [
+      {"name": "Activos intangibles", "present": "Sí | No | Parcial", "strength": "Fuerte | Moderada | Débil | Ninguna", "rationale": "1-2 frases."},
+      {"name": "Costes de reemplazo", "present": "Sí | No | Parcial", "strength": "Fuerte | Moderada | Débil | Ninguna", "rationale": "1-2 frases."},
+      {"name": "Efecto red", "present": "Sí | No | Parcial", "strength": "Fuerte | Moderada | Débil | Ninguna", "rationale": "1-2 frases."},
+      {"name": "Ventajas en costes", "present": "Sí | No | Parcial", "strength": "Fuerte | Moderada | Débil | Ninguna", "rationale": "1-2 frases."}
+    ]
+  },
+  "porter": {
+    "summary": "2-3 frases sobre la estructura competitiva del sector.",
+    "forces": [
+      {"name": "Rivalidad entre competidores", "intensity": "Alta | Media | Baja", "favorable_for_company": true, "rationale": "1-2 frases."},
+      {"name": "Amenaza de nuevos entrantes", "intensity": "Alta | Media | Baja", "favorable_for_company": true, "rationale": "1-2 frases."},
+      {"name": "Amenaza de sustitutivos", "intensity": "Alta | Media | Baja", "favorable_for_company": true, "rationale": "1-2 frases."},
+      {"name": "Poder de clientes", "intensity": "Alta | Media | Baja", "favorable_for_company": true, "rationale": "1-2 frases."},
+      {"name": "Poder de proveedores", "intensity": "Alta | Media | Baja", "favorable_for_company": true, "rationale": "1-2 frases."}
+    ]
+  },
+  "management": {
+    "capital_allocation": "1-2 frases sobre asignación de capital.",
+    "alignment": "1-2 frases sobre alineamiento de intereses / skin in the game.",
+    "operating_skill": "1-2 frases sobre pericia operativa.",
+    "integrity": "1-2 frases sobre integridad."
+  },
+  "business_quality": "Empresa Excelente | Negocio Cíclico Aceptable | Negocio Deficiente — con breve explicación.",
+  "thesis": "Tesis de inversión a 5-10 años (3-4 frases).",
+  "risks": ["Riesgo estructural 1", "Riesgo estructural 2", "Riesgo estructural 3"],
+  "confidence": "Alta | Media | Baja"
+}
+
+Nota sobre "favorable_for_company": true si esa fuerza es favorable para la empresa
+(por ejemplo, intensidad baja de rivalidad o de amenaza suele ser favorable), false si no.
 """
 
 USER_TEMPLATE = """
-Analiza la calidad fundamental del negocio de **{name}** (ticker {ticker}, sector {sector},
+Analiza la calidad fundamental del negocio de {name} (ticker {ticker}, sector {sector},
 industria {industry}, país {country}).
 
 Descripción del negocio:
 {description}
 
-Datos financieros y señales cuantitativas ya calculadas (NO inventes otras cifras):
-```json
+Señales cuantitativas ya calculadas (NO inventes otras cifras):
 {signals_json}
-```
 
-Resumen de valoración (precio actual vs valoración media de 4 modelos):
+Resumen de valoración:
 {valuation_summary}
 
-Devuelve un informe en Markdown con EXACTAMENTE estas secciones y encabezados:
-
-## MOAT
-Evalúa cada uno de los 4 tipos de foso (intangibles, costes de reemplazo, efecto red,
-ventajas en costes). Para cada uno indica: Presente (Sí/No/Parcial) y Fuerza (Fuerte/Moderada/Débil/Ninguna).
-Termina con una línea "MOAT_GLOBAL: Wide|Narrow|None".
-
-## PORTER
-Analiza las 5 fuerzas. Para cada una indica intensidad (Alta/Media/Baja) y si es favorable
-para la empresa.
-
-## EQUIPO_GESTOR
-Evalúa asignación de capital, alineamiento de intereses, pericia operativa e integridad,
-con la información disponible.
-
-## CALIDAD_NEGOCIO
-Clasifica el negocio (Empresa Excelente / Negocio Cíclico Aceptable / Negocio Deficiente) y explica.
-
-## TESIS
-Tesis de inversión a 5-10 años: ¿por qué merece o no la pena tenerla en cartera?
-
-## RIESGOS
-Lista los principales riesgos estructurales (viñetas).
-
-## CONFIANZA
-Indica "CONFIANZA: Alta|Media|Baja" y una frase justificando.
+{json_instructions}
 """
 
 
@@ -96,7 +97,9 @@ class GeminiAnalyst:
         return self.settings.ai_enabled
 
     def analyze(self, profile: CompanyProfile, signals: Dict,
-                valuation: ValuationResult) -> Optional[str]:
+                valuation: ValuationResult) -> Optional[Dict]:
+        """Devuelve {'ok': True, 'data': {...}} con el JSON del modelo,
+        o {'ok': False, 'error': '...'} si algo falla. None si la IA está desactivada."""
         if not self.enabled:
             return None
         try:
@@ -107,7 +110,6 @@ class GeminiAnalyst:
                 model_name=self.settings.gemini_model,
                 system_instruction=SYSTEM_PROMPT,
             )
-            val_summary = self._valuation_summary(valuation)
             prompt = USER_TEMPLATE.format(
                 name=profile.name or profile.ticker,
                 ticker=profile.ticker,
@@ -116,24 +118,49 @@ class GeminiAnalyst:
                 country=profile.country or "n/d",
                 description=(profile.description or "n/d")[:1500],
                 signals_json=json.dumps(signals, indent=2, default=str, ensure_ascii=False),
-                valuation_summary=val_summary,
+                valuation_summary=self._valuation_summary(valuation),
+                json_instructions=JSON_INSTRUCTIONS,
             )
             resp = model.generate_content(
                 prompt,
-                generation_config={"temperature": 0.2, "max_output_tokens": 2048},
+                generation_config={
+                    "temperature": 0.2,
+                    "max_output_tokens": 2048,
+                    "response_mime_type": "application/json",
+                },
             )
-            return resp.text
+            data = self._extract_json(resp.text)
+            if data is None:
+                return {"ok": False, "error": "La IA no devolvió un JSON válido."}
+            return {"ok": True, "data": data}
         except Exception as exc:  # noqa: BLE001
-            return f"__AI_ERROR__: {exc}"
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[Dict]:
+        if not text:
+            return None
+        t = text.strip()
+        # Quita vallas de markdown si las hubiera (```json ... ```)
+        if t.startswith("```"):
+            t = t.strip("`")
+            if t.lower().startswith("json"):
+                t = t[4:]
+        # Recorta al primer { y último }
+        start = t.find("{")
+        end = t.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            t = t[start:end + 1]
+        try:
+            return json.loads(t)
+        except json.JSONDecodeError:
+            return None
 
     @staticmethod
     def _valuation_summary(v: ValuationResult) -> str:
-        parts = []
-        for m in v.models:
-            if m.included and m.value_per_share:
-                parts.append(f"{m.name}={m.value_per_share}")
+        parts = [f"{m.name}={m.value_per_share}" for m in v.models
+                 if m.included and m.value_per_share]
         line = ", ".join(parts) if parts else "sin valoraciones válidas"
         return (f"Precio actual: {v.current_price}. Valoración media: {v.mean_valuation}. "
                 f"Precio máx. compra (margen {int(v.margin_of_safety*100)}%): {v.max_buy_price}. "
-                f"Modelos: {line}. Potencial vs precio: "
-                f"{round((v.upside_vs_price or 0)*100, 1)}%.")
+                f"Modelos: {line}. Potencial vs precio: {round((v.upside_vs_price or 0)*100, 1)}%.")

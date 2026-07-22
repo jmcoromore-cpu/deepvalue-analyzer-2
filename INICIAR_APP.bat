@@ -6,9 +6,9 @@ REM ============================================================
 title DeepValue - Lanzador
 
 REM Situarse en la carpeta de este .bat (raiz del proyecto).
-REM Las ventanas hijas heredan esta carpeta, por eso dentro usamos
-REM rutas relativas (cd backend / cd frontend): asi los espacios en
-REM la ruta (p.ej. "Analizador empresas") no dan problemas.
+REM Las ventanas hijas heredan esta carpeta, por eso dentro se
+REM usan rutas relativas (cd backend / cd frontend): asi los
+REM espacios en la ruta no dan problemas.
 cd /d "%~dp0"
 
 echo.
@@ -21,13 +21,13 @@ echo ============================================================
 echo.
 
 REM --- 1) Backend: activa el entorno virtual y lanza uvicorn ---
-start "DeepValue - BACKEND" cmd /k "cd backend ^&^& call .venv\Scripts\activate ^&^& uvicorn main:app --reload --port 8000"
+start "DeepValue - BACKEND" cmd /k "cd backend && call .venv\Scripts\activate && uvicorn main:app --reload --port 8000"
 
 REM --- 2) Espera a que el backend arranque ---
 timeout /t 6 /nobreak >nul
 
 REM --- 3) Frontend: lanza el servidor de desarrollo ---
-start "DeepValue - FRONTEND" cmd /k "cd frontend ^&^& npm run dev"
+start "DeepValue - FRONTEND" cmd /k "cd frontend && npm run dev"
 
 REM --- 4) Espera a que el frontend este listo y abre el navegador ---
 timeout /t 10 /nobreak >nul
