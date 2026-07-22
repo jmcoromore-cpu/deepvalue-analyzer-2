@@ -1,0 +1,16 @@
+# Nota: sin versiones fijas para que pip instale las ruedas precompiladas
+# más recientes compatibles con tu versión de Python (evita tener que compilar).
+fastapi
+uvicorn[standard]
+pydantic>=2
+pydantic-settings
+python-dotenv
+yfinance
+edgartools
+requests
+pandas
+numpy
+cachetools
+google-generativeai
+httpx
+pytest
